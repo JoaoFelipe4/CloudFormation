@@ -4,7 +4,11 @@ Description: EC2 ARM64 Amazon Linux 2023 with VPC, Subnet, and SSM Role
 Parameters:
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
+    Default: ""
     Description: Optional EC2 KeyPair for SSH access
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
 
 Resources:
 
@@ -96,7 +100,7 @@ Resources:
       SecurityGroupIds:
         - !Ref InstanceSecurityGroup
       IamInstanceProfile: !Ref EC2InstanceProfile
-      KeyName: !Ref KeyName
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref "AWS::NoValue"]
       ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}"
       Tags:
         - Key: Name
