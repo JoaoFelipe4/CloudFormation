@@ -1,0 +1,102 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EC2 com cfn-signal e acesso via SSM Session Manager
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+
+  ########################
+  # IAM Role para SSM
+  ########################
+  EC2SSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2SSMRole
+
+  ########################
+  # Security Group
+  ########################
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG para EC2 com SSM (sem SSH)
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  ########################
+  # EC2 Instance
+  ########################
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT2M
+        Count: 1
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: EC2-SSM-CFNSignal
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -xe
+
+          # Atualiza pacotes
+          dnf update -y
+
+          # Garante que o SSM Agent está ativo
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+
+          # Instala cfn-bootstrap (caso não esteja presente)
+          dnf install -y aws-cfn-bootstrap
+
+          # Simula algum bootstrap (exemplo)
+          echo "Instância configurada com sucesso" > /tmp/status.txt
+
+          # Envia sinal de sucesso para o CloudFormation
+          /opt/aws/bin/cfn-signal \
+            --exit-code $? \
+            --stack ${AWS::StackName} \
+            --resource EC2Instance \
+            --region ${AWS::Region}
+
+Outputs:
+  InstanceId:
+    Description: ID da instância EC2
+    Value: !Ref EC2Instance
+
+  SSMConnectHint:
+    Description: Use o Session Manager para conectar
+    Value: "AWS Console > EC2 > Instances > Connect > Session Manager"
