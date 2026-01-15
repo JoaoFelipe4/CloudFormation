@@ -1,24 +1,119 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: EC2 com cfn-signal e acesso via SSM Session Manager sasda
+Description: VPC isolada com EC2, SSM Session Manager e cfn-signal
 
 Parameters:
   InstanceType:
     Type: String
     Default: t3.micro
-    AllowedValues:
-      - t3.micro
-      - t3.small
-      - t3.medium
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.0.1.0/24
 
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-    Description: VPC onde a instância será criada
-
 Resources:
+
+  ########################
+  # VPC
+  ########################
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: cfn-signal-vpc
+
+  ########################
+  # Internet Gateway
+  ########################
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: cfn-signal-igw
+
+  AttachIGW:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  ########################
+  # Subnet pública
+  ########################
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCidr
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: cfn-signal-public-subnet
+
+  ########################
+  # Route Table
+  ########################
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: cfn-signal-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIGW
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  ########################
+  # Security Group
+  ########################
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG para EC2 com SSM
+      VpcId: !Ref VPC
+
+      # Ingress (exemplo: liberar ICMP e HTTPS se quiser testar)
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+      # Egress (necessário para SSM)
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+      Tags:
+        - Key: Name
+          Value: cfn-signal-sg
 
   ########################
   # IAM Role para SSM
@@ -26,6 +121,7 @@ Resources:
   EC2SSMRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: cfn-signal-ec2-ssm-role
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -39,20 +135,9 @@ Resources:
   EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
+      InstanceProfileName: cfn-signal-ec2-profile
       Roles:
         - !Ref EC2SSMRole
-
-  ########################
-  # Security Group
-  ########################
-  InstanceSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: SG para EC2 com SSM
-      VpcId: !Ref VpcId
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
 
   ########################
   # EC2 Instance
@@ -61,36 +146,34 @@ Resources:
     Type: AWS::EC2::Instance
     CreationPolicy:
       ResourceSignal:
-        Timeout: PT2M
+        Timeout: PT10M
         Count: 1
     Properties:
       InstanceType: !Ref InstanceType
       ImageId: !Ref LatestAmiId
+      SubnetId: !Ref PublicSubnet
       IamInstanceProfile: !Ref EC2InstanceProfile
       SecurityGroupIds:
         - !Ref InstanceSecurityGroup
       Tags:
         - Key: Name
-          Value: EC2-SSM-CFNSignal
+          Value: cfn-signal-ec2
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
           set -xe
 
-          # Atualiza pacotes
           dnf update -y
 
-          # Garante que o SSM Agent está ativo
+          # SSM Agent (já vem instalado no AL2023)
           systemctl enable amazon-ssm-agent
           systemctl start amazon-ssm-agent
 
-          # Instala cfn-bootstrap (caso não esteja presente)
+          # cfn-bootstrap
           dnf install -y aws-cfn-bootstrap
 
-          # Simula algum bootstrap (exemplo)
-          echo "Instância configurada com sucesso" > /tmp/status.txt
+          echo "Bootstrap finalizado com sucesso" > /tmp/bootstrap-status.txt
 
-          # Envia sinal de sucesso para o CloudFormation
           /opt/aws/bin/cfn-signal \
             --exit-code $? \
             --stack ${AWS::StackName} \
@@ -102,6 +185,12 @@ Outputs:
     Description: ID da instância EC2
     Value: !Ref EC2Instance
 
-  SSMConnectHint:
-    Description: Use o Session Manager para conectar
-    Value: "AWS Console > EC2 > Instances > Connect > Session Manager"
+  PublicSubnetId:
+    Value: !Ref PublicSubnet
+
+  VpcId:
+    Value: !Ref VPC
+
+  SessionManager:
+    Description: Conecte via Session Manager
+    Value: "EC2 Console > Instance > Connect > Session Manager"
